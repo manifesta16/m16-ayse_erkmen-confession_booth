@@ -7,6 +7,9 @@ if [ ! -f ".env" ]; then
     exit 1
 fi
 
+echo "Prüfe auf Updates..."
+git -C "$(dirname "$0")/.." pull --ff-only 2>/dev/null && echo "Aktuell." || echo "Kein Update (kein Internet oder keine Änderungen)."
+
 if [ ! -d "node_modules" ]; then
     echo "Installiere Abhängigkeiten..."
     npm install
