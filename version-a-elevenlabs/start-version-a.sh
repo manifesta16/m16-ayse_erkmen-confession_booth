@@ -1,0 +1,25 @@
+#!/bin/bash
+cd "$(dirname "$0")"
+
+if [ ! -f ".env" ]; then
+    echo ".env fehlt. Bitte .env.example kopieren und ausfüllen:"
+    echo "  cp .env.example .env"
+    exit 1
+fi
+
+if [ ! -d "node_modules" ]; then
+    echo "Installiere Abhängigkeiten..."
+    npm install
+fi
+
+echo ""
+echo "Confession Booth Version A läuft auf http://localhost:3000"
+echo "Strg+C zum Beenden."
+echo ""
+# Warten bis der Server bereit ist, dann Browser öffnen
+(sleep 2 && if open -Ra "Google Chrome" 2>/dev/null; then
+  open -a "Google Chrome" --args --app=http://localhost:3000
+else
+  open http://localhost:3000
+fi) &
+node server.js

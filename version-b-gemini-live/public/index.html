@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Confession Booth</title>
+
+<style>
+body {
+  background: #f3f1eb;
+  color: #5e5e5a;
+  font-family: "Times New Roman", serif;
+  margin: 0;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.container {
+  width: 60%;
+  max-width: 720px;
+  text-align: left;
+}
+
+h1 {
+  font-weight: normal;
+  font-size: 14px;
+  letter-spacing: 0.18em;
+  color: #9a978f;
+  margin-bottom: 70px;
+  transition: color 1.2s ease;
+}
+
+h1.active { color: #3f3f3c; }
+
+#log {
+  font-size: 20px;
+  line-height: 1.9;
+  white-space: pre-wrap;
+  transition: opacity 1.2s ease;
+}
+
+button {
+  position: fixed;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: none;
+  border: none;
+  color: #9a978f;
+  font-size: 12px;
+  letter-spacing: 0.22em;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+button:hover { color: #3f3f3c; }
+
+.priest { margin-top: 18px; }
+
+.fade-in {
+  animation: fadeIn 1.8s ease forwards;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+  <h1 id="status">silence</h1>
+  <div id="log"></div>
+</div>
+
+<button id="btn" onclick="toggle()">speak</button>
+
+<script>
+// ─────────────────────────────────────────────────────────────
+// Gemini Live: Audio rein, Audio raus. Keine Sprach-Konfiguration
+// nötig — das Modell erkennt die gesprochene Sprache selbst.
+//
+// Input:  16kHz PCM16 mono  → WebSocket → Server → Gemini
+// Output: 24kHz PCM16 mono  ← WebSocket ← Server ← Gemini
+// ─────────────────────────────────────────────────────────────
+
+const CLEAR_AFTER_MS = 20000;
+
+const log = document.getElementById("log");
+const status = document.getElementById("status");
+const btn = document.getElementById("btn");
+
+let ws = null;
+let micCtx = null, micStream = null, micNode = null;
+let playCtx = null, playTime = 0;
+let running = false;
+let userLine = null, priestLine = null;
+let clearTimer = null;
+
+function setStatus(t, active) {
+  status.innerText = t;
+  status.classList.toggle("active", !!active);
+}
+
+// ── Anzeige: Transkripte kommen als Fragmente und werden angehängt ──
+function appendUserText(t) {
+  if (!userLine) {
+    userLine = document.createElement("div");
+    userLine.className = "fade-in";
+    log.appendChild(userLine);
+  }
+  userLine.innerText += t;
+}
+
+function appendPriestText(t) {
+  if (!priestLine) {
+    priestLine = document.createElement("div");
+    priestLine.className = "fade-in priest";
+    log.appendChild(priestLine);
+  }
+  priestLine.innerText += t;
+}
+
+function scheduleClear() {
+  clearTimeout(clearTimer);
+  clearTimer = setTimeout(() => {
+    log.style.opacity = 0;
+    setTimeout(() => {
+      log.innerHTML = "";
+      log.style.opacity = 1;
+      userLine = null;
+      priestLine = null;
+    }, 1200);
+  }, CLEAR_AFTER_MS);
+}
+
+// ── Audio-Wiedergabe: PCM-Chunks lückenlos einreihen ─────────
+function playChunk(b64) {
+  if (!playCtx) {
+    playCtx = new AudioContext({ sampleRate: 24000 });
+    playTime = playCtx.currentTime;
+  }
+  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const pcm = new Int16Array(bytes.buffer);
+  const floats = new Float32Array(pcm.length);
+  for (let i = 0; i < pcm.length; i++) floats[i] = pcm[i] / 32768;
+
+  const buf = playCtx.createBuffer(1, floats.length, 24000);
+  buf.getChannelData(0).set(floats);
+
+  const src = playCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(playCtx.destination);
+
+  playTime = Math.max(playTime, playCtx.currentTime);
+  src.start(playTime);
+  playTime += buf.duration;
+}
+
+function stopPlayback() {
+  if (playCtx) { playCtx.close(); playCtx = null; }
+}
+
+// ── Mikrofon: aufnehmen, auf 16kHz reduzieren, senden ────────
+async function startMic() {
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+  });
+  micCtx = new AudioContext({ sampleRate: 16000 });
+  const source = micCtx.createMediaStreamSource(micStream);
+
+  // ScriptProcessor: simpel und überall lauffähig — für eine
+  // Installation wichtiger als die modernere AudioWorklet-API.
+  micNode = micCtx.createScriptProcessor(4096, 1, 1);
+  micNode.onaudioprocess = (e) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const f32 = e.inputBuffer.getChannelData(0);
+    const pcm = new Int16Array(f32.length);
+    for (let i = 0; i < f32.length; i++) {
+      const s = Math.max(-1, Math.min(1, f32[i]));
+      pcm[i] = s < 0 ? s * 32768 : s * 32767;
+    }
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(pcm.buffer)));
+    ws.send(JSON.stringify({ type: "audio", data: b64 }));
+  };
+  source.connect(micNode);
+  micNode.connect(micCtx.destination); // nötig, damit der Node läuft
+}
+
+function stopMic() {
+  micNode?.disconnect();
+  micStream?.getTracks().forEach(t => t.stop());
+  micCtx?.close();
+  micNode = micStream = micCtx = null;
+}
+
+// ── Verbindung ───────────────────────────────────────────────
+async function toggle() {
+  if (running) { stop(); return; }
+
+  running = true;
+  btn.innerText = "leave";
+  setStatus("…", true);
+
+  ws = new WebSocket(`ws://${location.host}/live`);
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    switch (msg.type) {
+      case "ready":
+        startMic().then(() => setStatus("listening", true))
+          .catch(() => { setStatus("microphone blocked"); stop(); });
+        break;
+      case "audio":       playChunk(msg.data); break;
+      case "userText":    appendUserText(msg.text); break;
+      case "priestText":  appendPriestText(msg.text); break;
+      case "turnComplete":
+        userLine = null;
+        priestLine = null;
+        scheduleClear();
+        setStatus("listening", true);
+        break;
+      case "interrupted": stopPlayback(); break;
+      case "error":       setStatus(msg.detail || "connection error", true); stop(); break;
+    }
+  };
+
+  ws.onclose = () => { if (running) stop(); };
+  ws.onerror = () => { setStatus("silence"); stop(); };
+}
+
+function stop() {
+  running = false;
+  btn.innerText = "speak";
+  setStatus("silence");
+  stopMic();
+  stopPlayback();
+  try { ws?.close(); } catch {}
+  ws = null;
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,11 @@
+# Dependencies
+node_modules/
+
+# API Keys — niemals ins Repository
+.env
+
+# macOS
+.DS_Store
+
+# Logs
+npm-debug.log*

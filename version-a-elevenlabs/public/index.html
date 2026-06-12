@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Confession Booth</title>
+
+<style>
+body {
+  background: #f3f1eb;
+  color: #5e5e5a;
+  font-family: "Times New Roman", serif;
+  margin: 0;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.container {
+  width: 60%;
+  max-width: 720px;
+  text-align: left;
+}
+
+h1 {
+  font-weight: normal;
+  font-size: 14px;
+  letter-spacing: 0.18em;
+  color: #9a978f;
+  margin-bottom: 70px;
+  transition: color 1.2s ease;
+}
+
+h1.active { color: #3f3f3c; }
+
+#log {
+  font-size: 20px;
+  line-height: 1.9;
+  white-space: pre-wrap;
+  transition: opacity 1.2s ease;
+}
+
+button {
+  position: fixed;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: none;
+  border: none;
+  color: #9a978f;
+  font-size: 12px;
+  letter-spacing: 0.22em;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+button:hover { color: #3f3f3c; }
+
+.fade-in {
+  animation: fadeIn 1.8s ease forwards;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+  <h1 id="status">silence</h1>
+  <div id="log"></div>
+</div>
+
+<button id="speakBtn" onclick="startListening()">speak</button>
+
+<script>
+const CONFIG = {
+  CLEAR_AFTER_MS:    20000,
+  SPEAK_DELAY_MS:    900,   // dramatische Pause vor der Antwort
+  SILENCE_MS:        2000,  // Stille nach der diese Dauer → Aufnahme stoppt
+  SILENCE_THRESHOLD: 0.012, // RMS-Lautstärke unterhalb = Stille
+  MIN_RECORD_MS:     600,   // Stille-Erkennung setzt erst danach ein
+};
+
+const log    = document.getElementById("log");
+const status = document.getElementById("status");
+const btn    = document.getElementById("speakBtn");
+
+let busy        = false;
+let recorder    = null;
+let audioChunks = [];
+let rafId       = null;     // requestAnimationFrame ID
+let silenceSince = null;    // Zeitstempel des Stille-Beginns
+let recordingStart = null;  // Zeitstempel der Aufnahme
+
+function setStatus(t, active) {
+  status.innerText = t;
+  status.classList.toggle("active", !!active);
+}
+
+function playBase64Mp3(b64) {
+  return new Promise((resolve) => {
+    const audio = new Audio("data:audio/mpeg;base64," + b64);
+    audio.onended = resolve;
+    audio.onerror = resolve;
+    setTimeout(() => audio.play().catch(resolve), CONFIG.SPEAK_DELAY_MS);
+  });
+}
+
+function speakFallback(text) {
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 0.8;
+  u.pitch = 0.6;
+  setTimeout(() => speechSynthesis.speak(u), CONFIG.SPEAK_DELAY_MS);
+}
+
+function clearScreenSlow() {
+  setTimeout(() => {
+    log.style.opacity = 0;
+    setTimeout(() => { log.innerHTML = ""; log.style.opacity = 1; }, 1200);
+  }, CONFIG.CLEAR_AFTER_MS);
+}
+
+function addLine(text, isPriest) {
+  const el = document.createElement("div");
+  el.className = "fade-in";
+  if (isPriest) el.style.marginTop = "18px";
+  el.innerText = text;
+  log.appendChild(el);
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result.split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+// ── RMS-Lautstärke aus AnalyserNode berechnen ────────────────
+function getRMS(analyser) {
+  const buf = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(buf);
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) {
+    const v = (buf[i] - 128) / 128;
+    sum += v * v;
+  }
+  return Math.sqrt(sum / buf.length);
+}
+
+async function startListening() {
+  if (busy) return;
+  busy = true;
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    setStatus("microphone blocked", true);
+    busy = false;
+    return;
+  }
+
+  audioChunks    = [];
+  silenceSince   = null;
+  recordingStart = Date.now();
+
+  // ── Stille-Erkennung via Web Audio API ───────────────────
+  const audioCtx = new AudioContext();
+  const source   = audioCtx.createMediaStreamSource(stream);
+  const analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  source.connect(analyser);
+
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
+
+  recorder.onstop = async () => {
+    cancelAnimationFrame(rafId);
+    stream.getTracks().forEach((t) => t.stop());
+    audioCtx.close();
+
+    const blob     = new Blob(audioChunks, { type: recorder.mimeType });
+    const mimeType = recorder.mimeType;
+    audioChunks    = [];
+
+    if (blob.size < 1000) {
+      setStatus("silence");
+      btn.style.opacity = 1;
+      busy = false;
+      return;
+    }
+
+    setStatus("…", true);
+    btn.style.opacity = 0.3;
+
+    try {
+      const audioBase64 = await blobToBase64(blob);
+      const res = await fetch("/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audio: audioBase64, mimeType }),
+      });
+
+      if (!res.ok) throw new Error("server " + res.status);
+      const data = await res.json();
+
+      if (data.transcript) addLine(data.transcript, false);
+      addLine(data.reply, true);
+      setStatus("silence");
+
+      if (data.audio) await playBase64Mp3(data.audio);
+      else speakFallback(data.reply);
+
+      clearScreenSlow();
+    } catch (err) {
+      console.error(err);
+      addLine("…", true);
+      setStatus("silence");
+    } finally {
+      btn.style.opacity = 1;
+      busy = false;
+    }
+  };
+
+  // ── Stille-Erkennungs-Loop ────────────────────────────────
+  function detectSilence() {
+    rafId = requestAnimationFrame(detectSilence);
+
+    const elapsed = Date.now() - recordingStart;
+    if (elapsed < CONFIG.MIN_RECORD_MS) return; // Anlaufzeit abwarten
+
+    const rms = getRMS(analyser);
+    if (rms < CONFIG.SILENCE_THRESHOLD) {
+      if (!silenceSince) silenceSince = Date.now();
+      const silentFor = Date.now() - silenceSince;
+      // Visuelles Feedback: Status blinkt bei nahendem Stopp
+      const frac = Math.min(silentFor / CONFIG.SILENCE_MS, 1);
+      status.style.opacity = 1 - frac * 0.6;
+      if (silentFor >= CONFIG.SILENCE_MS) recorder.stop();
+    } else {
+      silenceSince = null;
+      status.style.opacity = 1;
+    }
+  }
+
+  recorder.start();
+  setStatus("listening", true);
+  btn.style.opacity = 0.5;
+  detectSilence();
+}
+</script>
+
+</body>
+</html>
