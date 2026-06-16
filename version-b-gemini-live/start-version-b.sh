@@ -16,13 +16,14 @@ if [ ! -d "node_modules" ]; then
 fi
 
 echo ""
-echo "Confession Booth Version B läuft auf http://localhost:3001"
+echo "Confession Booth Version B läuft auf http://localhost:3000"
 echo "Strg+C zum Beenden."
 echo ""
 # Warten bis der Server bereit ist, dann Browser öffnen
-(sleep 5 && if open -Ra "Google Chrome" 2>/dev/null; then
-  open -a "Google Chrome" --args --app=http://localhost:3001 --start-fullscreen
+(sleep 5 && CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+if [ -f "$CHROME" ]; then
+  "$CHROME" --app=http://localhost:3000 --start-fullscreen &
 else
-  open http://localhost:3001
+  open http://localhost:3000
 fi) &
 node server.js
