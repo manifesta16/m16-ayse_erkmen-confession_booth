@@ -21,7 +21,7 @@ echo "Strg+C zum Beenden."
 echo ""
 # Warten bis der Server bereit ist, dann Browser öffnen
 (sleep 2 && if open -Ra "Google Chrome" 2>/dev/null; then
-  open -a "Google Chrome" --args --kiosk http://localhost:3001
+  open -a "Google Chrome" --args --app=http://localhost:3001 --start-fullscreen
 else
   open http://localhost:3001
 fi) &
