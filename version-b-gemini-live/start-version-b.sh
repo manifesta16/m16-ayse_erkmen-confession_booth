@@ -20,7 +20,7 @@ echo "Confession Booth Version B läuft auf http://localhost:3001"
 echo "Strg+C zum Beenden."
 echo ""
 # Warten bis der Server bereit ist, dann Browser öffnen
-(sleep 2 && if open -Ra "Google Chrome" 2>/dev/null; then
+(sleep 5 && if open -Ra "Google Chrome" 2>/dev/null; then
   open -a "Google Chrome" --args --app=http://localhost:3001 --start-fullscreen
 else
   open http://localhost:3001
