@@ -7,7 +7,7 @@
 <style>
 body {
   background: #f3f1eb;
-  color: #5e5e5a;
+  color: #C8C9C7; /* Pantone 427 U */
   font-family: "Times New Roman", serif;
   margin: 0;
   height: 100vh;
@@ -76,7 +76,7 @@ button:hover { color: #3f3f3c; }
   <div id="log"></div>
 </div>
 
-<button id="btn" onclick="toggle()">speak</button>
+<button id="btn" onclick="toggle()" style="display:none"></button>
 
 <script>
 // ─────────────────────────────────────────────────────────────
@@ -164,6 +164,14 @@ function stopPlayback() {
   if (playCtx) { playCtx.close(); playCtx = null; }
 }
 
+// ── VAD-Konfiguration ─────────────────────────────────────────
+const VAD = {
+  THRESHOLD:    0.015, // RMS-Pegel ab dem Sprache erkannt wird
+  PRE_CHUNKS:   6,     // Chunks vor Sprachbeginn mitsenden (Anlauf)
+  HOLD_MS:      2500,  // nach letzter Sprache noch X ms weiter senden
+                       // (muss > silenceDurationMs auf dem Server sein)
+};
+
 // ── Mikrofon: aufnehmen, auf 16kHz reduzieren, senden ────────
 async function startMic() {
   micStream = await navigator.mediaDevices.getUserMedia({
@@ -172,22 +180,60 @@ async function startMic() {
   micCtx = new AudioContext({ sampleRate: 16000 });
   const source = micCtx.createMediaStreamSource(micStream);
 
-  // ScriptProcessor: simpel und überall lauffähig — für eine
-  // Installation wichtiger als die modernere AudioWorklet-API.
+  let isSending    = false;
+  let holdTimer    = null;
+  const preBuffer  = []; // Ringpuffer vor Sprachbeginn
+
   micNode = micCtx.createScriptProcessor(4096, 1, 1);
   micNode.onaudioprocess = (e) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
     const f32 = e.inputBuffer.getChannelData(0);
+
+    // RMS berechnen
+    let sum = 0;
+    for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
+    const rms = Math.sqrt(sum / f32.length);
+
+    // PCM16 + Base64
     const pcm = new Int16Array(f32.length);
     for (let i = 0; i < f32.length; i++) {
       const s = Math.max(-1, Math.min(1, f32[i]));
       pcm[i] = s < 0 ? s * 32768 : s * 32767;
     }
     const b64 = btoa(String.fromCharCode(...new Uint8Array(pcm.buffer)));
-    ws.send(JSON.stringify({ type: "audio", data: b64 }));
+
+    if (rms > VAD.THRESHOLD) {
+      // Sprache erkannt — Puffer leeren und ab jetzt senden
+      if (!isSending) {
+        preBuffer.forEach(chunk =>
+          ws.send(JSON.stringify({ type: "audio", data: chunk }))
+        );
+        preBuffer.length = 0;
+        isSending = true;
+        setStatus("listening", true);
+      }
+      // Halte-Timer zurücksetzen
+      clearTimeout(holdTimer);
+      holdTimer = setTimeout(() => {
+        isSending = false;
+        setStatus("silence");
+      }, VAD.HOLD_MS);
+
+      ws.send(JSON.stringify({ type: "audio", data: b64 }));
+    } else if (isSending) {
+      // Stille, aber noch in der Haltezeit — weiter senden damit
+      // Gemini genug Stille bekommt um den Turn zu erkennen
+      ws.send(JSON.stringify({ type: "audio", data: b64 }));
+    } else {
+      // Stille, nicht aktiv — nur Puffer befüllen
+      preBuffer.push(b64);
+      if (preBuffer.length > VAD.PRE_CHUNKS) preBuffer.shift();
+    }
   };
+
   source.connect(micNode);
-  micNode.connect(micCtx.destination); // nötig, damit der Node läuft
+  micNode.connect(micCtx.destination);
 }
 
 function stopMic() {
@@ -228,19 +274,24 @@ async function toggle() {
     }
   };
 
-  ws.onclose = () => { if (running) stop(); };
-  ws.onerror = () => { setStatus("silence"); stop(); };
+  ws.onclose = () => { if (running) { stop(); setTimeout(toggle, 3000); } };
+  ws.onerror = () => { setStatus("silence"); stop(); setTimeout(toggle, 3000); };
 }
 
 function stop() {
   running = false;
-  btn.innerText = "speak";
   setStatus("silence");
   stopMic();
   stopPlayback();
   try { ws?.close(); } catch {}
   ws = null;
 }
+
+// Vollbild anfordern + automatisch verbinden
+window.addEventListener("load", () => {
+  document.documentElement.requestFullscreen?.().catch(() => {});
+  setTimeout(toggle, 800);
+});
 </script>
 
 </body>

@@ -74,7 +74,7 @@ button:hover { color: #3f3f3c; }
   <div id="log"></div>
 </div>
 
-<button id="speakBtn" onclick="startListening()">speak</button>
+<button id="speakBtn" onclick="startListening()" style="display:none"></button>
 
 <script>
 const CONFIG = {
@@ -223,8 +223,9 @@ async function startListening() {
       addLine("…", true);
       setStatus("silence");
     } finally {
-      btn.style.opacity = 1;
       busy = false;
+      // Automatisch neu zuhören nach kurzer Pause
+      setTimeout(startListening, 1500);
     }
   };
 
@@ -251,9 +252,11 @@ async function startListening() {
 
   recorder.start();
   setStatus("listening", true);
-  btn.style.opacity = 0.5;
   detectSilence();
 }
+
+// Automatisch starten sobald die Seite geladen ist
+window.addEventListener("load", () => setTimeout(startListening, 800));
 </script>
 
 </body>
